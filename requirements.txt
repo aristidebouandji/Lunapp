@@ -1,0 +1,8 @@
+mistralai
+python-dotenv
+requests
+pybase64
+streamlit
+pandas
+numpy
+scikit-learn
