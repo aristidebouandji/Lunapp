@@ -15,6 +15,8 @@ import base64
 from mistralai import Mistral
 from dotenv import load_dotenv
 import shutil
+import time
+import random
 
 
 load_dotenv()
@@ -131,7 +133,7 @@ def find_matches(invoice, transactions):
     return None, 0.0, {'method': 'non_trouve'}
 
 def process_invoices(image_folder):
-    """Traitement des images de factures"""
+    """Traitement des images de factures avec rate limiting"""
     invoices = []
 
     # Récupération de l'API key du modèle Mistral
@@ -158,10 +160,19 @@ def process_invoices(image_folder):
         )
     }
 
-    for img_file in os.listdir(image_folder):
-        if not img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
-            continue
-
+    # Récupérer tous les fichiers d'image éligibles
+    image_files = [img_file for img_file in os.listdir(image_folder) 
+                  if img_file.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    
+    # Configuration pour rate limiting
+    base_delay = 1.0  # Délai initial entre les requêtes (1 seconde)
+    
+    # Ajout d'une barre de progression
+    progress_bar = st.progress(0)
+    status_placeholder = st.empty()
+    
+    for i, img_file in enumerate(image_files):
+        status_placeholder.info(f"Traitement de la facture {i+1}/{len(image_files)}: {img_file}")
         img_path = os.path.join(image_folder, img_file)
 
         try:
@@ -171,34 +182,74 @@ def process_invoices(image_folder):
             st.error(f"Erreur lecture {img_file}: {e}")
             continue
 
-        try:
-            response = client.chat.complete(
-                model=model,
-                messages=[
-                    system_message,
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "Extract data"},
-                        {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_img}"}
-                    ]}
-                ],
-                response_format={"type": "json_object"}
-            )
+        # Initialisation pour le backoff exponentiel
+        max_retries = 5
+        retry_count = 0
+        current_delay = base_delay
+        success = False
+        
+        while retry_count < max_retries and not success:
+            try:
+                # Attendre avant d'envoyer la requête (plus longtemps après chaque échec)
+                time.sleep(current_delay)
+                
+                # Envoi de la requête à l'API
+                response = client.chat.complete(
+                    model=model,
+                    messages=[
+                        system_message,
+                        {"role": "user", "content": [
+                            {"type": "text", "text": "Extract data"},
+                            {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_img}"}
+                        ]}
+                    ],
+                    response_format={"type": "json_object"}
+                )
 
-            data = json.loads(response.choices[0].message.content)
-            data['amount'] = float(data['amount'])
-            data['currency'] = data['currency'].upper()
-            data['date_parsed'] = parse_date(data['date'])
+                data = json.loads(response.choices[0].message.content)
+                data['amount'] = float(data['amount'])
+                data['currency'] = data['currency'].upper()
+                data['date_parsed'] = parse_date(data['date'])
 
-            if not data['date_parsed']:
-                raise ValueError(f"Date invalide: {data['date']}")
+                if not data['date_parsed']:
+                    raise ValueError(f"Date invalide: {data['date']}")
 
-            data['source_file'] = img_file
-            invoices.append(data)
+                data['source_file'] = img_file
+                invoices.append(data)
+                
+                # Marquer comme réussi
+                success = True
+                
+            except Exception as e:
+                retry_count += 1
+                
+                # Si c'est une erreur 429, augmenter considérablement le délai
+                if "429" in str(e) or "rate limit exceeded" in str(e).lower():
+                    # Backoff exponentiel avec jitter (randomisation)
+                    current_delay = min(30.0, current_delay * 2 + random.uniform(0, 1))
+                    status_placeholder.warning(f"Rate limit atteint pour {img_file}. Nouvelle tentative dans {current_delay:.1f}s (essai {retry_count}/{max_retries})")
+                else:
+                    # Autre type d'erreur, augmenter légèrement le délai
+                    current_delay = min(10.0, current_delay * 1.5)
+                    status_placeholder.warning(f"Erreur pour {img_file}: {e}. Nouvelle tentative dans {current_delay:.1f}s (essai {retry_count}/{max_retries})")
+                    
+                # Si toutes les tentatives ont échoué, afficher l'erreur
+                if retry_count == max_retries:
+                    st.error(f"Erreur traitement {img_file} après {max_retries} tentatives: {e}")
+                    
+                # Petite pause avant de réessayer
+                time.sleep(1)
+                continue
 
-        except Exception as e:
-            st.error(f"Erreur traitement {img_file}: {e}")
-            continue
+        # Mise à jour de la barre de progression
+        progress_bar.progress((i + 1) / len(image_files))
+        
+        # Délai entre chaque facture pour éviter le rate limiting
+        time.sleep(base_delay)
 
+    # Effacer les messages de statut temporaires
+    status_placeholder.empty()
+    
     return invoices
 
 def process_transactions(csv_folder):
