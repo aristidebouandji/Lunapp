@@ -1,3 +1,7 @@
+
+![Lunapp logo](https://github.com/user-attachments/assets/6d259d4d-c7e4-4c6a-8bc4-888b92818aee)
+
+
 # Correspondance Automatique Factures / Relevés Bancaires
 
 Cette application Streamlit permet d'automatiser la correspondance entre les factures (au format image) et les relevés bancaires (au format CSV). Elle utilise l'IA pour extraire les informations des factures et les faire correspondre avec les transactions bancaires.
